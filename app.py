@@ -1,106 +1,97 @@
 from flask import Flask, jsonify
+import pandas as pd
+import io
 import requests
-from bs4 import BeautifulSoup
 import os
 
 app = Flask(__name__)
 
-# DOĞRU HEDEF: RealGM EuroLeague Fikstür Sayfası
-TARGET_URL = "https://basketball.realgm.com/international/league/1/Euroleague/schedules"
+# DOĞRU KAYNAK: IvoVillanueva'nın GitHub'ındaki RAW CSV dosyası
+CSV_URL = "https://raw.githubusercontent.com/IvoVillanueva/BOXSCORES-EUROLEAGE-2025_26/main/data/euroleague_boxscore_2025_26.csv"
 
 @app.route('/', methods=['GET'])
 def home():
-    return "<h1>EuroLeague API Online</h1><p>Git: <a href='/euroleague'>/euroleague</a></p>"
+    return "<h1>EuroLeague Resmi Veri Sunucusu</h1><p>Veriler icin: <a href='/euroleague'>/euroleague</a></p>"
 
 @app.route('/euroleague', methods=['GET'])
-def get_schedule():
+def get_csv_data():
     try:
-        # RealGM botları engellemesin diye gerçek tarayıcı taklidi yapıyoruz
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        
-        # Siteye bağlan
-        response = requests.get(TARGET_URL, headers=headers)
-        
+        # 1. CSV'yi GitHub'dan çek
+        response = requests.get(CSV_URL)
         if response.status_code != 200:
-            return jsonify([{"error": f"Site Acilmadi. Hata Kodu: {response.status_code}"}])
+            return jsonify([{"error": "Veri Kaynagina Ulasilamadi"}]), 500
 
-        soup = BeautifulSoup(response.content, 'html.parser')
+        # 2. Pandas ile oku (CSV işlemek için en iyisi)
+        # CSV içeriğini bir bellek dosyası gibi okuyoruz
+        df = pd.read_csv(io.StringIO(response.text))
         
-        # RealGM'de fikstür tablosunu bul
-        # Genelde sayfanın ilk tablosudur
-        table = soup.find('table') 
+        # 3. Veriyi Sadeleştir (Mobil uygulama için sadece maç sonuçlarını alalım)
+        # Bu CSV oyuncu bazlıdır (Boxscore). Maç skorunu bulmak için gruplama yapmalıyız.
         
-        if not table:
-             # Bazen mobilde tablo farklıdır, alternatif arama
-            return jsonify([{"error": "Tablo Bulunamadı. HTML Yapisi Farkli Olabilir."}])
+        # Gerekli sütunlar (Tahmini sütun isimleri - repoya göre değişebilir ama genelde standarttır)
+        # Depo açıklamasında 'team_name', 'opp_team_name', 'pts', 'id_match', 'date', 'ronda' olduğu yazıyor.
+        
+        # Her maç ID'si için takımların toplam puanlarını hesapla
+        match_scores = df.groupby(['id_match', 'team_name', 'opp_team_name', 'date', 'ronda'])['pts'].sum().reset_index()
+        
+        # Şimdi bunu "Ev Sahibi - Deplasman" formatına çevirelim
+        # Her maç için 2 satır vardır (A vs B ve B vs A). Tekilleştirmemiz lazım.
+        
+        unique_matches = []
+        processed_ids = set()
 
-        rows = table.find('tbody').find_all('tr')
-        matches = []
-        match_id = 1
-        current_date = "Tarih Yok"
-
-        for row in rows:
-            cols = row.find_all('td')
-            # Satırda en az 3 veri olmalı (Tarih/Ev/Dep)
-            if len(cols) < 3: 
+        for index, row in match_scores.iterrows():
+            match_id = row['id_match']
+            
+            if match_id in processed_ids:
                 continue
-
-            # Tarih sütunu (Genelde ilk sütun)
-            date_text = cols[0].get_text(strip=True)
-            if date_text:
-                current_date = date_text
             
-            # Takımlar ve Skorlar
-            # RealGM Yapısı: [Tarih, Ev Sahibi, Skor/Saat, Deplasman, ...]
-            home_team = cols[1].get_text(strip=True)
-            result_col = cols[2].get_text(strip=True)
-            away_team = cols[3].get_text(strip=True)
+            # Bu maçın diğer takımının skorunu bul
+            # Aynı maç ID'sine sahip diğer satırı buluyoruz
+            opponent_row = match_scores[
+                (match_scores['id_match'] == match_id) & 
+                (match_scores['team_name'] != row['team_name'])
+            ]
             
-            home_score = "-"
-            away_score = "-"
-            status = result_col
-            is_live = False
+            if not opponent_row.empty:
+                opp_score = opponent_row.iloc[0]['pts']
+                
+                # Takım A (row) ve Takım B (opponent_row)
+                home_team = row['team_name']
+                home_score = int(row['pts'])
+                
+                away_team = row['opp_team_name']
+                away_score = int(opp_score)
+                
+                # Logo Oluşturucu
+                h_logo = f"https://ui-avatars.com/api/?name={home_team}&background=random&color=fff&size=128&bold=true"
+                a_logo = f"https://ui-avatars.com/api/?name={away_team}&background=random&color=fff&size=128&bold=true"
 
-            # Skor Kontrolü (Örn: "88-74" veya "W 90-80")
-            if "-" in result_col and ":" not in result_col:
-                parts = result_col.replace("W ","").replace("L ","").split("-")
-                if len(parts) >= 2:
-                    home_score = parts[0].strip()
-                    away_score = parts[1].strip()
-                    status = "FINAL"
-            else:
-                # Oynanmamış maç (Örn: "20:45")
-                status = result_col
+                unique_matches.append({
+                    "id": int(match_id),
+                    "round": str(row['ronda']), # Örn: "Round 1"
+                    "date": str(row['date']),
+                    "homeTeam": home_team,
+                    "awayTeam": away_team,
+                    "homeScore": str(home_score),
+                    "awayScore": str(away_score),
+                    "status": "FINAL", # CSV'de sadece bitmiş maçlar olur
+                    "isLive": False,
+                    "homeLogo": h_logo,
+                    "awayLogo": a_logo
+                })
+                
+                processed_ids.add(match_id)
 
-            # Logo Oluşturucu
-            h_logo = f"https://ui-avatars.com/api/?name={home_team}&background=random&color=fff&size=128"
-            a_logo = f"https://ui-avatars.com/api/?name={away_team}&background=random&color=fff&size=128"
+        # En son oynanan maçları (Tarihe veya ID'ye göre) sırala
+        # Pandas DataFrame olmadığı için listeyi id'ye göre ters çevirelim
+        unique_matches.sort(key=lambda x: x['id'], reverse=True)
 
-            matches.append({
-                "id": match_id,
-                "date": current_date,
-                "homeTeam": home_team,
-                "awayTeam": away_team,
-                "homeScore": home_score,
-                "awayScore": away_score,
-                "status": status,
-                "isLive": is_live,
-                "homeLogo": h_logo,
-                "awayLogo": a_logo
-            })
-            match_id += 1
-
-        # En son oynanan maçları görmek için listeyi ters çevirip ilk 50'yi al
-        # RealGM geleceği de gösterir, ters çevirince en son sonuçlar üste gelir.
-        return jsonify(matches[::-1][:50])
+        return jsonify(unique_matches)
 
     except Exception as e:
-        return jsonify([{"error": str(e)}])
+        return jsonify([{"error": f"Veri İşleme Hatası: {str(e)}"}]), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=5000)
-
+    app.run(host='0.0.0.0', port=port)
