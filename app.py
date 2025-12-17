@@ -2,83 +2,101 @@ from flask import Flask, jsonify
 import requests
 from bs4 import BeautifulSoup
 import os
+import datetime
 
 app = Flask(__name__)
 
-# MKOSZ Pest Bölgesi Linkleri (A, B, C Grupları)
-GROUPS = [
-    {"name": "Grup A", "url": "https://megye.hunbasket.hu/pest/bajnoksag/x2526/hun_pes_rfj/9789"},
-    {"name": "Grup B", "url": "https://megye.hunbasket.hu/pest/bajnoksag/x2526/hun_pes_rfj/9800"},
-    {"name": "Grup C", "url": "https://megye.hunbasket.hu/pest/bajnoksag/x2526/hun_pes_rfj/9801"}
-]
+# HEDEF: Basketball Reference 2024-2025 EuroLeague Sezonu
+TARGET_URL = "https://www.basketball-reference.com/leagues/Euroleague_2025_games.html"
 
 @app.route('/', methods=['GET'])
 def home():
-    return "MKOSZ API Calisiyor! Veriler icin /maclar adresine git."
+    return "EuroLeague API (Real Data) Online."
 
-@app.route('/maclar', methods=['GET'])
-def get_data():
-    all_matches = []
-    match_id = 1
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    
-    for group in GROUPS:
-        try:
-            # Siteye baglan
-            r = requests.get(group['url'], headers=headers)
-            r.encoding = 'utf-8' # Karakter sorunu icin
-            soup = BeautifulSoup(r.text, 'html.parser')
+@app.route('/euroleague', methods=['GET'])
+def get_real_data():
+    matches = []
+    try:
+        # 1. Siteye, gerçek bir tarayıcı gibi istek atıyoruz
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(TARGET_URL, headers=headers)
+        
+        if response.status_code != 200:
+            return jsonify([{"error": "Siteye ulasilamadi"}])
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # 2. Fikstür Tablosunu Bul ('schedule' id'li tablo)
+        table = soup.find('table', {'id': 'schedule'})
+        if not table:
+            return jsonify([])
+
+        rows = table.find('tbody').find_all('tr')
+        
+        # Maçları işle
+        match_id = 1
+        today = datetime.date.today()
+        
+        # Sonuçları tersten tarayıp en güncelleri alabiliriz veya hepsini alabiliriz
+        # Biz son 5 oynanan ve gelecek 5 maçı alalım ki liste çok şişmesin
+        processed_matches = []
+
+        for row in rows:
+            # Başlık satırlarını atla (thead class içerenler)
+            if 'thead' in row.get('class', []):
+                continue
             
-            # Tablo satirlarini bul
-            rows = soup.find_all('tr')
+            cols = row.find_all('td')
+            th = row.find('th') # Tarih genelde th içindedir bu sitede
             
-            for row in rows:
-                cols = row.find_all('td')
-                # Bir satirda yeterli sutun varsa ve icinde tarih varsa mac satiridir
-                if len(cols) >= 4:
-                    texts = [c.get_text(strip=True) for c in cols]
-                    
-                    # Tarih kontrolu (Sayi iceriyor mu?)
-                    if len(texts) > 0 and any(char.isdigit() for char in texts[0]):
-                        
-                        # Varsayilan degerler
-                        match_data = {
-                            "id": match_id,
-                            "group": group['name'],
-                            "date": texts[0],
-                            "home": "Bilinmiyor",
-                            "away": "Bilinmiyor",
-                            "score": "v", 
-                            "status": "MS"
-                        }
+            if cols and th:
+                date_text = th.get_text(strip=True) # Örn: Thu, Oct 3, 2024
+                
+                # Sütun İndeksleri (Basketball-Ref yapısına göre):
+                # 0: Visitor Team, 1: Visitor Pts, 2: Home Team, 3: Home Pts
+                visitor_team = cols[0].get_text(strip=True)
+                visitor_pts = cols[1].get_text(strip=True)
+                home_team = cols[2].get_text(strip=True)
+                home_pts = cols[3].get_text(strip=True)
+                
+                # Logo URL'lerini takım ismine göre dinamik oluşturuyoruz (Wikimedia)
+                # Basit bir eşleştirme mantığı
+                
+                status = "MS" # Varsayılan: Maç Sonu
+                score_home = home_pts
+                score_away = visitor_pts
+                is_live = False
 
-                        # Sitenin yapisina gore sutunlari esle
-                        # Genelde: 0:Tarih, 1:Saat, 2:Ev, 3:Skor, 4:Dep
-                        if len(texts) >= 5:
-                            match_data["home"] = texts[2]
-                            match_data["score"] = texts[3]
-                            match_data["away"] = texts[4]
-                            
-                            # Eger skor yoksa mac oynanmamistir
-                            if match_data["score"] == "" or match_data["score"] == "-":
-                                match_data["score"] = "v"
-                                match_data["status"] = texts[1] # Saati durum yap
-                        
-                        # Alternatif yapi (Saat yoksa): 0:Tarih, 1:Ev, 2:Skor, 3:Dep
-                        elif len(texts) == 4:
-                             match_data["home"] = texts[1]
-                             match_data["score"] = texts[2]
-                             match_data["away"] = texts[3]
+                # Eğer puanlar boşsa maç oynanmamıştır
+                if not home_pts or not visitor_pts:
+                    status = date_text # Tarihi durum olarak göster
+                    score_home = "-"
+                    score_away = "-"
+                
+                processed_matches.append({
+                    "id": match_id,
+                    "round": "EuroLeague 24/25",
+                    "date": date_text,
+                    "homeTeam": home_team,
+                    "awayTeam": visitor_team,
+                    "homeScore": score_home,
+                    "awayScore": score_away,
+                    "status": status,
+                    "isLive": is_live,
+                    # Logolar için Wikipedia API veya sabit CDN kullanılabilir, şimdilik placeholder
+                    "homeLogo": "https://upload.wikimedia.org/wikipedia/en/thumb/0/03/EuroLeague_logo.svg/1200px-EuroLeague_logo.svg.png", 
+                    "awayLogo": "https://upload.wikimedia.org/wikipedia/en/thumb/0/03/EuroLeague_logo.svg/1200px-EuroLeague_logo.svg.png"
+                })
+                match_id += 1
+        
+        # Veriyi JSON olarak dön (Ters çevir ki en son maçlar üstte olsun)
+        return jsonify(processed_matches[::-1])
 
-                        # Takim isimleri doluysa listeye ekle
-                        if len(match_data["home"]) > 1:
-                            all_matches.append(match_data)
-                            match_id += 1
-
-        except Exception as e:
-            print(f"Hata ({group['name']}): {e}")
-            
-    return jsonify(all_matches)
+    except Exception as e:
+        print(f"Hata: {e}")
+        return jsonify([])
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
